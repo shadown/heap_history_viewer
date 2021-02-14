@@ -6,6 +6,8 @@
 
 #include "heaphistory.h"
 
+#include <cinttypes>
+
 // Constructors for helper classes.
 
 HeapConflict::HeapConflict(uint32_t tick, uint64_t address, bool alloc)
@@ -47,14 +49,14 @@ void HeapHistory::LoadFromJSONStream(std::istream &jsondata) {
   nlohmann::json incoming_data;
   incoming_data << jsondata;
 
-  uint32_t counter = 0;
   for (const auto &json_element : incoming_data) {
     if (!hasMandatoryJSONElementFields(json_element)) {
+      printf("OH NOES MANDATORY ELEMENT MISSING\n");
       continue;
     }
     // The "type" field is mandatory for every event.
     std::string type = json_element["type"].get<std::string>();
-    std::string tag = "";
+    std::string tag;
     if (json_element.find("tag") != json_element.end()) {
       tag = json_element["tag"].get<std::string>();
     }
@@ -75,20 +77,28 @@ void HeapHistory::LoadFromJSONStream(std::istream &jsondata) {
     } else if (type == "event") {
       recordEvent(tag, color);
     } else if (type == "rangefree") {
-      uint64_t low = json_element["low"].get<uint64_t>();
-      uint64_t high = json_element["high"].get<uint64_t>();
+      auto low = json_element["low"].get<uint64_t>();
+      auto high = json_element["high"].get<uint64_t>();
       recordFreeRange(low, high, de_duped_tag, 0);
     } else if (type == "address") {
       recordAddress(json_element["address"].get<uint64_t>(), tag, color);
     } else if (type == "filterrange") {
-      uint64_t low = json_element["low"].get<uint64_t>();
-      uint64_t high = json_element["high"].get<uint64_t>();
+      auto low = json_element["low"].get<uint64_t>();
+      auto high = json_element["high"].get<uint64_t>();
       recordFilterRange(low, high);
     }
 
     fflush(stdout);
   }
-  printf("heap_blocks_.size() is %d\n", heap_blocks_.size());
+  printf("heap_blocks_.size() is %zu\n", heap_blocks_.size());
+  // Sweep through the existing blocks and dump out the non-freed ones.:w
+  for (const auto& block : heap_blocks_) {
+    if (!block.wasFreed()) {
+      printf("Alive block:\n%s\n", getBlockInformationAsString(block).c_str());
+    } else {
+      printf("Freed block:\n%s\n", getBlockInformationAsString(block).c_str());
+    }
+  }
   fflush(stdout);
 
   // Initialize the internal caches.
@@ -96,6 +106,7 @@ void HeapHistory::LoadFromJSONStream(std::istream &jsondata) {
     - global_area_.minimum_address_;
   active_region_cache_ = ActiveRegionCache(height,
     &heap_blocks_);
+
 }
 
 // Decide whether a block is worth sending to the graphics card.
@@ -116,10 +127,7 @@ inline bool HeapHistory::isBlockActive(const HeapBlock &block,
   if (block.end_tick_ < min_tick) {
     return false;
   }
-  if (block.start_tick_ > max_tick) {
-    return false;
-  }
-  return true;
+  return block.start_tick_ <= max_tick;
 }
 
 void HeapHistory::setCurrentWindow(const HeapWindow &new_window) {
@@ -152,7 +160,8 @@ void HeapHistory::recordMalloc(uint64_t address, size_t size,
     recordMallocConflict(address, size, heap_id);
     return;
   }
-  heap_blocks_.push_back(HeapBlock(current_tick_, size, address, tag));
+  assert(size <= std::numeric_limits<uint32_t>::max());
+  heap_blocks_.emplace_back(current_tick_, static_cast<uint32_t>(size), address, tag);
   this->cached_blocks_sorted_by_address_.clear();
 
   live_blocks_[std::make_pair(address, heap_id)] = heap_blocks_.size() - 1;
@@ -174,7 +183,7 @@ void HeapHistory::recordFree(uint64_t address, const std::string *tag,
   if (isEventFiltered(address)) {
     return;
   }
-  std::map<std::pair<uint64_t, uint8_t>, size_t>::iterator current_block =
+  auto current_block =
       live_blocks_.find(std::make_pair(address, heap_id));
   if (current_block == live_blocks_.end()) {
     recordFreeConflict(address, heap_id);
@@ -193,9 +202,9 @@ void HeapHistory::recordFree(uint64_t address, const std::string *tag,
 void HeapHistory::recordFreeRange(uint64_t low_end, uint64_t high_end,
                                   const std::string *tag, uint8_t heap_id) {
   // Find the lower boundary.
-  std::map<std::pair<uint64_t, uint8_t>, size_t>::iterator start_block =
+  auto start_block =
       live_blocks_.lower_bound(std::make_pair(low_end, heap_id));
-  std::map<std::pair<uint64_t, uint8_t>, size_t>::iterator end_block =
+  auto end_block =
       live_blocks_.upper_bound(std::make_pair(high_end, heap_id));
   std::vector<std::pair<uint64_t, uint8_t>> blocks_to_free;
 
@@ -207,7 +216,7 @@ void HeapHistory::recordFreeRange(uint64_t low_end, uint64_t high_end,
     // iterators.
     if ((block_heap_id == heap_id) && (block_address >= low_end) &&
         (block_address <= high_end)) {
-      blocks_to_free.push_back(std::make_pair(block_address, heap_id));
+      blocks_to_free.emplace_back(block_address, heap_id);
     }
     ++start_block;
   }
@@ -217,16 +226,19 @@ void HeapHistory::recordFreeRange(uint64_t low_end, uint64_t high_end,
 }
 
 void HeapHistory::recordFilterRange(uint64_t low, uint64_t high) {
-  filter_ranges_.push_back(std::make_pair(low, high));
+  filter_ranges_.emplace_back(low, high);
 }
 
 void HeapHistory::recordFreeConflict(uint64_t address, uint8_t heap_id) {
-  conflicts_.push_back(HeapConflict(current_tick_, address, false));
+  Q_UNUSED(heap_id);
+  conflicts_.emplace_back(current_tick_, address, false);
 }
 
 void HeapHistory::recordMallocConflict(uint64_t address, size_t size,
                                        uint8_t heap_id) {
-  conflicts_.push_back(HeapConflict(current_tick_, address, true));
+  Q_UNUSED(size);
+  Q_UNUSED(heap_id);
+  conflicts_.emplace_back(current_tick_, address, true);
 }
 
 void HeapHistory::recordRealloc(uint64_t old_address, uint64_t new_address,
@@ -260,9 +272,9 @@ void HeapHistory::recordAddress(uint64_t address, const std::string &label,
 // Functions to fill HeapVertex vectors for rendering
 
 void colorToFloats(uint32_t color, float* red, float* green, float* blue) {
-  *red = static_cast<float>((color & 0xFF0000) >> 16) / 255.0;
-  *green = static_cast<float>((color & 0xFF00) >> 8) / 255.0;
-  *blue = static_cast<float>(color & 0xFF) / 255.0;
+  *red = static_cast<float>((color & 0xFF0000) >> 16) / 255.0f;
+  *green = static_cast<float>((color & 0xFF00) >> 8) / 255.0f;
+  *blue = static_cast<float>(color & 0xFF) / 255.0f;
 }
 
 void HeapHistory::eventsToVertices(std::vector<HeapVertex> *vertices) const {
@@ -300,7 +312,7 @@ void HeapHistory::getActiveRegions(std::map<uint64_t, uint64_t>* regions,
   // level. We take 1/100 of the screen height at the moment.
   long double yscaling = current_window_.getYScalingHeapToScreen();
   long double minimum_size = ((1.0/3.0) / yscaling);
-  uint64_t uint_minsize = static_cast<uint64_t>(minimum_size);
+  auto uint_minsize = static_cast<uint64_t>(minimum_size);
 
   printf("YScaling is %Le, XScaling is %Le\n", current_window_.getYScalingHeapToScreen(),
     current_window_.getXScalingHeapToScreen());
@@ -319,10 +331,10 @@ void HeapHistory::activeRegionsToVertices(std::vector<HeapVertex> *vertices)
   uint64_t region_size;
   // Determine the correct active regions on this zoom level.
   getActiveRegions(&address_ranges, &region_size);
-  printf("Got %d ranges at granularity %lx\n", address_ranges.size(),
+  printf("Got %" PRIu64 " ranges at granularity %" PRIx64 "\n", uint64_t(address_ranges.size()),
     region_size);
 
-  QVector3D color = QVector3D(0.0, 0.7, 0.0);
+  QVector3D color = QVector3D(0.0f, 0.7f, 0.0f);
   uint32_t lower_left_x = 0; // Minimum Tick.
   uint32_t lower_right_x = getMaximumTick();
   for (std::pair<uint64_t, uint64_t> range : address_ranges) {
@@ -352,7 +364,7 @@ void HeapHistory::HeapBlockToVertices(const HeapBlock &block,
 inline uint64_t HeapHistory::getMinimumBlockSize() const {
   long double yscaling = current_window_.getYScalingHeapToScreen();
   long double minimum_size = ((1.0/1000.0) / yscaling);
-  uint64_t uint_min_size = uint64_t(minimum_size);
+  auto uint_min_size = static_cast<uint64_t>(minimum_size);
   return uint_min_size;
 }
 
@@ -377,13 +389,12 @@ size_t HeapHistory::heapBlockVerticesForActiveWindow(
   uint64_t maximum_tick = current_window_.getMaximumTickUint32();
 
   size_t active_block_count = 0;
-  for (std::vector<HeapBlock>::const_iterator iter = heap_blocks_.begin();
-       iter != heap_blocks_.end(); ++iter) {
-    bool active = isBlockActive(*iter, uint_min_size, minimum_address,
+  for (const auto & heap_block : heap_blocks_) {
+    bool active = isBlockActive(heap_block, uint_min_size, minimum_address,
       maximum_address, minimum_tick, maximum_tick) || all;
 
     if (active) {
-      HeapBlockToVertices(*iter, vertices);
+      HeapBlockToVertices(heap_block, vertices);
       ++active_block_count;
     }
   }
@@ -401,17 +412,15 @@ bool HeapHistory::getEventAtTick(uint32_t tick, std::string *eventstring) {
 
     while ((iterator_approx != tick_to_event_strings_.end() &&
            (abs(static_cast<int32_t>(iterator_approx->first - tick)) < 300))) {
-      if (abs(static_cast<int32_t>(iterator_approx->first - tick)) <= minimum) {
-        minimum = abs(static_cast<int32_t>(iterator_approx->first - tick));
+
+      uint32_t distance = abs(static_cast<int32_t>(iterator_approx->first - tick));
+      if (distance <= minimum) {
+        minimum = distance;
         *eventstring = iterator_approx->second.second;
       }
       ++iterator_approx;
     }
-    if (minimum != std::numeric_limits<uint32_t>::max()) {
-      return true;
-    } else {
-      return false;
-    }
+    return minimum != std::numeric_limits<uint32_t>::max();
   } else {
     *eventstring = iterator->second.second;
     return true;
@@ -423,7 +432,7 @@ bool HeapHistory::getEventAtTick(uint32_t tick, std::string *eventstring) {
 // block.
 bool HeapHistory::getBlockAtSlow(uint64_t address, uint32_t tick,
                                  HeapBlock *result, uint32_t *index) {
-  for (std::vector<HeapBlock>::iterator iter = heap_blocks_.begin();
+  for (auto iter = heap_blocks_.begin();
        iter != heap_blocks_.end(); ++iter) {
     if (iter->contains(tick, address)) {
       *result = *iter;
@@ -436,9 +445,9 @@ bool HeapHistory::getBlockAtSlow(uint64_t address, uint32_t tick,
 
 void HeapHistory::updateCachedSortedIterators() {
   // Makes sure there is a sorted iterator array.
-  if (cached_blocks_sorted_by_address_.size() == 0) {
+  if (cached_blocks_sorted_by_address_.empty()) {
     // Fill the iterator cache.
-    for (std::vector<HeapBlock>::iterator iter = heap_blocks_.begin();
+    for (auto iter = heap_blocks_.begin();
          iter != heap_blocks_.end(); ++iter) {
       cached_blocks_sorted_by_address_.push_back(iter);
     }
@@ -470,7 +479,7 @@ bool HeapHistory::getBlockAt(uint64_t address, uint32_t tick, HeapBlock *result,
   const std::vector<std::vector<HeapBlock>::iterator>::iterator candidate =
       std::lower_bound(cached_blocks_sorted_by_address_.begin(),
                        cached_blocks_sorted_by_address_.end(), val,
-                       [this](const std::vector<HeapBlock>::iterator &iterator,
+                       [](const std::vector<HeapBlock>::iterator &iterator,
                               const std::pair<uint64_t, uint32_t> &pair) {
                          fflush(stdout);
                          return (pair.first < iterator->address_) ||
@@ -480,7 +489,7 @@ bool HeapHistory::getBlockAt(uint64_t address, uint32_t tick, HeapBlock *result,
     return false;
   }
   // Check that the point lies within the candidate block.
-  std::vector<HeapBlock>::iterator block = *candidate;
+  auto block = *candidate;
   if ((address > (block->address_ + block->size_)) ||
       (address < block->address_) || (tick > block->end_tick_) ||
       (tick < block->start_tick_)) {

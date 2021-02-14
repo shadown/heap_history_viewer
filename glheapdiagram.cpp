@@ -1,8 +1,6 @@
-#include <math.h>
-
+#include <cinttypes>
 #include <iostream>
 #include <fstream>
-#include <sstream>
 
 #include <QApplication>
 #include <QFileDialog>
@@ -19,11 +17,13 @@
 #include "glheapdiagram.h"
 
 GLHeapDiagram::GLHeapDiagram(QWidget *parent)
-    : QOpenGLWidget(parent), block_layer_(new HeapBlockDiagramLayer()),
+    : QOpenGLWidget(parent),
+      file_to_load_(""),
+      is_GL_initialized_(false),
+      block_layer_(new HeapBlockDiagramLayer()),
       event_layer_(new EventDiagramLayer()),
       address_layer_(new AddressDiagramLayer()),
-      pages_layer_(new ActiveRegionsDiagramLayer()),
-      is_GL_initialized_(false), file_to_load_("") {
+      pages_layer_(new ActiveRegionsDiagramLayer()) {
 
   //  QObject::connect(this, SIGNAL(blockClicked), parent->parent(),
   //  SLOT(blockClicked));
@@ -32,7 +32,7 @@ GLHeapDiagram::GLHeapDiagram(QWidget *parent)
 void GLHeapDiagram::loadFileInternal() {
   if (is_GL_initialized_) {
     // Load the heap history.
-    if (file_to_load_ != "") {
+    if (!file_to_load_.empty()) {
       std::ifstream ifs(file_to_load_, std::fstream::in);
       heap_history_.LoadFromJSONStream(ifs);
     }
@@ -64,9 +64,9 @@ void GLHeapDiagram::initializeGL() {
   loadFileInternal();
 }
 
-QSize GLHeapDiagram::minimumSizeHint() { return QSize(500, 500); }
+QSize GLHeapDiagram::minimumSizeHint() const { return {500, 500}; }
 
-void GLHeapDiagram::setFileToDisplay(QString filename) {
+void GLHeapDiagram::setFileToDisplay(const QString& filename) {
   file_to_load_ = filename.toStdString();
   loadFileInternal();
 }
@@ -78,7 +78,7 @@ void GLHeapDiagram::setSizeToHighlight(uint32_t size) {
   update();
 }
 
-QSize GLHeapDiagram::sizeHint() { return QSize(1024, 1024); }
+QSize GLHeapDiagram::sizeHint() const { return {1024, 1024}; }
 
 void GLHeapDiagram::updateHeapToScreenMap() {
   double y_scaling;
@@ -141,9 +141,9 @@ void GLHeapDiagram::update() {
   QOpenGLWidget::update();
 }
 
-void GLHeapDiagram::resizeGL(int w, int h) { printf("Resize GL was called\n"); }
+void GLHeapDiagram::resizeGL(int w, int h) { printf("Resize GL was called w: %d h: %d\n", w, h); }
 
-GLHeapDiagram::~GLHeapDiagram() {}
+GLHeapDiagram::~GLHeapDiagram() = default;
 
 void GLHeapDiagram::mousePressEvent(QMouseEvent *event) {
   double x = static_cast<double>(event->x()) / this->width();
@@ -158,7 +158,7 @@ void GLHeapDiagram::mousePressEvent(QMouseEvent *event) {
   HeapBlock current_block;
   uint32_t index;
 
-  printf("clicked at tick %d and address %lx\n", tick, address);
+  printf("clicked at tick %d and address %" PRIx64 "\n", tick, address);
   fflush(stdout);
 
   if (!heap_history_.getBlockAtSlow(address, tick, &current_block, &index)) {
@@ -166,11 +166,11 @@ void GLHeapDiagram::mousePressEvent(QMouseEvent *event) {
     std::string eventstring;
     if (heap_history_.getEventAtTick(tick, &eventstring)) {
       char buf[1024];
-      sprintf(buf, "Event at tick %08.08lx: ", tick);
+      sprintf(buf, "Event at tick %8.8x: ", tick);
       emit showMessage(std::string(buf) + eventstring);
     } else {
       char buf[1024];
-      sprintf(buf, "Nothing here at tick %08.08lx and address %016.16lx", tick,
+      sprintf(buf, "Nothing here at tick %8.8x and address %16.16" PRIx64, tick,
               address);
       emit showMessage(std::string(buf));
     }
